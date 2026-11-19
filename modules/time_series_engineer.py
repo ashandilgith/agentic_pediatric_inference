@@ -28,11 +28,14 @@ def engineer_time_series_features(state: PediatricHealthState) -> PediatricHealt
     # Feature Interaction: Risk multiplier between low adherence and high pollution
     df["exposure_risk_index"] = df["pm25_3d_avg"] * (1.1 - df["med_adherence"])
     
-    # Target: Predict next-day flare event
-    df["target"] = df["flare_event"]
+    # Target: Predict NEXT-DAY flare event. Features on day t must only be used to
+    # predict day t+1; using the same day's flare label leaks the answer, because a
+    # flare itself lowers that day's SpO2 and raises the cough score.
+    df["target"] = df["flare_event"].shift(-1)
     
     # Quality Control Check: Detect missing values or zero-variance sensor failure
-    has_nulls = df.isnull().values.any()
+    # (The last row has no "tomorrow" label yet, so it is excluded from this check.)
+    has_nulls = df.iloc[:-1].isnull().values.any()
     zero_variance = (df["spo2"].std() < 0.1)
     
     # Evaluate quality
@@ -46,8 +49,10 @@ def engineer_time_series_features(state: PediatricHealthState) -> PediatricHealt
     # Select our clean input features
     feature_cols = ["pm25_3d_avg", "spo2_3d_avg", "cough_3d_avg", "exposure_risk_index"]
     
-    # Store matrix and target in state as pure Python lists for serialization
+    # Store matrix and target in state as pure Python lists for serialization.
+    # The feature matrix has one more row than the target vector: the final row is
+    # today, whose outcome (tomorrow) is unknown and is what we forecast.
     state["engineered_feature_matrix"] = df[feature_cols].values.tolist()
-    state["engineered_target_vector"] = df["target"].values.tolist()
+    state["engineered_target_vector"] = df["target"].iloc[:-1].astype(int).tolist()
     
     return state

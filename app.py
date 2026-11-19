@@ -115,9 +115,11 @@ if run_pipeline:
     acc = final_state["rolling_accuracy_score"] * 100
     calibrated = final_state["is_model_calibrated"]
     
-    col1.metric("Rolling Accuracy", f"{acc:.1f}%")
-    col2.metric("Calibration Status", "READY" if calibrated else "LEARNING", 
-                delta=">= 85%" if calibrated else "< 85%", delta_color="normal" if calibrated else "inverse")
+    col1.metric("Flare Recall", f"{final_state['model_recall']*100:.0f}%",
+                delta=f"precision {final_state['model_precision']*100:.0f}%", delta_color="off")
+    col2.metric("Model Status", "VALIDATED" if calibrated else "RULE FALLBACK",
+                delta=f"bal. acc {final_state['model_balanced_accuracy']*100:.0f}%",
+                delta_color="normal" if calibrated else "inverse")
     col3.metric("Acuteness Index", f"{final_state['model_acuteness_score']}/10.0")
     
     weights_str = ", ".join([f"{w:.2f}" for w in final_state['model_weights']])

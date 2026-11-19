@@ -1,7 +1,7 @@
 # Import TypedDict to define explicit type annotations for every key in the state
 from typing import TypedDict, Optional, List, Dict, Any
 
-class PediatricHealthState(TypedDict):
+class PediatricHealthState(TypedDict, total=False):
     # --- 1. Patient Identifiers & Baseline Medical Records ---
     patient_id: str                      # Unique patient tracking ID
     age_years: int                       # Age of the child
@@ -24,6 +24,7 @@ class PediatricHealthState(TypedDict):
     parent_reported_night_waking: bool   # Did the child wake up gasping or coughing?
     medication_adherence_percent: float  # Percentage of prescribed controller doses taken
     child_stress_activity_level: str     # 'low', 'moderate', 'intense_exercise'
+    daily_checkin: Dict[str, Any]        # Optional real inputs for today; overrides the demo values
     
     # --- 4. Clinical Ingestion Outputs ---
     extracted_symptom_triggers: List[str] # Triggers identified by ingestion agent
@@ -43,6 +44,13 @@ class PediatricHealthState(TypedDict):
     is_model_calibrated: bool            # True ONLY if rolling accuracy >= 0.85 (85%)
     model_acuteness_score: float         # Raw predicted severity index (0.0 to 10.0)
     model_binary_prediction: int         # 0 (Mild) or 1 (Severe Flare Imminent)
+    today_flare_probability: float       # Predicted probability of a flare TOMORROW (0.0 to 1.0)
+    model_recall: float                  # Share of past flares the model caught (prequential)
+    model_precision: float               # Share of model alerts that were real flares (prequential)
+    model_balanced_accuracy: float       # Mean of recall and specificity (robust to class imbalance)
+    baseline_accuracy: float             # Accuracy of always predicting "no flare" (the bar to beat)
+    flare_events_observed: int           # Number of flare days in the training history
+    risk_tier: str                       # 'low', 'elevated' or 'high' after critique reconciliation
     
     # --- 7. Multi-Agent Orchestration & Critique Dialogue ---
     initial_clinical_draft: str          # Preliminary technical diagnosis by first orchestrator
