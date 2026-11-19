@@ -1,47 +1,40 @@
 # Import shared state
 from core.state import PediatricHealthState
 
+TIERS = ["low", "elevated", "high"]
+
+
 def critique_clinical_draft(state: PediatricHealthState) -> PediatricHealthState:
-    """Adversarially cross-checks initial prediction against patient chart nuances and adherence."""
-    # Log critique entry
+    """Adversarially cross-checks the draft and can escalate (never lower) the risk tier."""
     state["execution_logs"].append("Critique Agent: Cross-examining draft against patient history and missed risks.")
-    
-    draft = state["initial_clinical_draft"]
+
     adherence = state["medication_adherence_percent"]
-    night_waking = state["parent_reported_night_waking"]
-    pet_present = state["home_pet_dander_present"]
+    humidity = state["home_humidity_percent"]
     diagnoses = state["secondary_conditions"]
-    
-    critique_points = []
-    
-    # 1. Challenge based on medication adherence
+    points = []
+
     if adherence <= 0.50:
-        critique_points.append(
-            "CRITIQUE - ADHERENCE DEFICIT: Patient took only 50% of controller medication. "
-            "The initial draft may underestimate airway inflammation compounding with environmental triggers."
+        points.append(
+            f"CRITIQUE - ADHERENCE DEFICIT: Only {adherence*100:.0f}% of controller doses taken. "
+            "The draft may underestimate airway inflammation compounding with environmental triggers."
         )
-        
-    # 2. Challenge based on night symptoms (hallmark sign of impending pediatric obstruction)
-    if night_waking:
-        critique_points.append(
-            "CRITIQUE - NOCTURNAL COUGH: Parent reported night waking due to coughing. "
-            "In pediatric asthma, nocturnal symptoms are a direct clinical indicator of destabilization within 24h."
+    if state["parent_reported_night_waking"]:
+        points.append(
+            "CRITIQUE - NOCTURNAL SYMPTOMS: Night waking from cough is a recognised sign of poor asthma control."
         )
-        
-    # 3. Challenge based on unconsidered allergen exposure
-    if pet_present and any("dust" in d.lower() or "allergy" in d.lower() for d in diagnoses):
-        critique_points.append(
-            "CRITIQUE - ALLERGEN SYNERGY: Child has known atopic allergies and a pet is present in high humidity. "
-            "Airway hyperresponsiveness will be significantly elevated."
-        )
-        
-    # Assemble pushback response
-    if critique_points:
-        critique_text = "\n".join(critique_points)
-    else:
-        critique_text = "CRITIQUE: Initial draft is clinically sound and accounts for all chart parameters."
-        
-    # Save critique to state
-    state["critique_pushback_notes"] = critique_text
-    state["execution_logs"].append(f"Critique Agent: Raised {len(critique_points)} clinical counterpoints.")
+    has_allergy = any("dust" in d.lower() or "allergy" in d.lower() for d in diagnoses)
+    if state["home_pet_dander_present"] and has_allergy:
+        detail = f" Indoor humidity is {humidity:.0f}%, which also favours dust mites." if humidity >= 60 else ""
+        points.append("CRITIQUE - ALLERGEN EXPOSURE: Known allergies with a pet in the home." + detail)
+
+    # Each counterpoint escalates the tier by one step; critique never downgrades risk.
+    current = TIERS.index(state.get("risk_tier", "low"))
+    new_tier = TIERS[min(current + (1 if len(points) >= 1 else 0) + (1 if len(points) >= 3 else 0), 2)]
+    if new_tier != state.get("risk_tier"):
+        points.append(f"CRITIQUE - ESCALATION: Risk tier raised from {state.get('risk_tier', 'low').upper()} to {new_tier.upper()}.")
+    state["risk_tier"] = new_tier
+
+    state["critique_pushback_notes"] = "\n".join(points) if points else \
+        "CRITIQUE: No additional risk factors found beyond the initial draft."
+    state["execution_logs"].append(f"Critique Agent: Raised {len(points)} counterpoints. Final tier: {new_tier.upper()}.")
     return state

@@ -3,91 +3,102 @@ import numpy as np
 # Import shared state
 from core.state import PediatricHealthState
 
+# --- Validation gate --------------------------------------------------------
+# Flares are rare (roughly 5-10% of days), so plain accuracy is misleading: a model
+# that always says "no flare" scores ~93% while catching nothing. The gate therefore
+# uses balanced accuracy and recall, and needs enough flare examples to judge them.
+MIN_FLARE_EVENTS = 5
+MIN_BALANCED_ACCURACY = 0.75
+MIN_RECALL = 0.60
+ALERT_THRESHOLD = 0.5
+LEARNING_RATE = 0.08
+
+
 def sigmoid(z: float) -> float:
     """Applies standard logistic sigmoid function to bound predictions between 0 and 1."""
-    # Clip z to prevent numerical overflow in exponential function
     z_clipped = np.clip(z, -20.0, 20.0)
-    # Return standard sigmoid formula
     return float(1.0 / (1.0 + np.exp(-z_clipped)))
 
+
 def train_and_predict_acuteness(state: PediatricHealthState) -> PediatricHealthState:
-    """Iteratively trains adaptive weights, adjusts on errors, and validates 85% accuracy threshold."""
-    # Log training entry
+    """Online logistic regression with prequential (predict-then-learn) evaluation.
+
+    Each historical day is first predicted with the weights learned from earlier days
+    only, then used to update the weights. Metrics are computed from those
+    out-of-sample predictions, so they estimate how the model would have performed live.
+    """
     state["execution_logs"].append("Adaptive Learner: Starting online learning cycle over historical patient samples.")
-    
-    # Extract matrices from state
-    X = np.array(state["engineered_feature_matrix"]) # Features: shape (N, 4)
-    y = np.array(state["engineered_target_vector"])   # Binary targets: shape (N,)
-    
-    # Normalize features using z-score normalization for training stability
-    mean = np.mean(X, axis=0)
-    std = np.std(X, axis=0) + 1e-7 # Prevent division by zero
-    X_norm = (X - mean) / std
-    
-    # Initialize or load existing weights (4 features + 1 bias)
-    num_features = X.shape[1]
-    weights = np.array(state.get("model_weights") or [0.1] * num_features, dtype=float)
+
+    X_all = np.array(state["engineered_feature_matrix"], dtype=float)  # (N+1, F); last row = today
+    y = np.array(state["engineered_target_vector"], dtype=int)          # (N,) next-day flare labels
+    X_hist, x_today = X_all[: len(y)], X_all[-1]
+
+    # Normalise with historical statistics only (today's row is not used to fit them)
+    mean = X_hist.mean(axis=0)
+    std = X_hist.std(axis=0) + 1e-7
+    X_norm = (X_hist - mean) / std
+    today_norm = (x_today - mean) / std
+
+    num_features = X_hist.shape[1]
+    weights = np.array(state.get("model_weights") or [0.0] * num_features, dtype=float)
     bias = float(state.get("model_bias") or 0.0)
-    learning_rate = 0.08
-    
-    # Perform online sample-by-sample training (Sequential trial and error)
-    recent_predictions = []
-    correct_count = 0
-    total_samples = len(y)
-    
-    for i in range(total_samples):
-        xi = X_norm[i]
-        yi = y[i]
-        
-        # Calculate linear combination: z = w·x + b
-        z = np.dot(weights, xi) + bias
-        # Calculate continuous probability output via sigmoid
-        prob = sigmoid(z)
-        # Convert continuous probability to binary prediction (0 or 1)
-        pred_binary = 1 if prob >= 0.5 else 0
-        
-        # Check if the prediction matched actual outcome
-        is_correct = (pred_binary == yi)
-        if is_correct:
-            correct_count += 1
-        else:
-            # ERROR OCCURRED: Apply gradient update to correct error
-            error = prob - yi
-            # Update weights in opposite direction of error gradient
-            weights -= learning_rate * error * xi
-            # Update bias term
-            bias -= learning_rate * error
-            
-        recent_predictions.append(1 if is_correct else 0)
-    
-    # Compute accuracy across the recent 40 samples (Rolling window accuracy)
-    window_size = min(40, total_samples)
-    rolling_acc = sum(recent_predictions[-window_size:]) / float(window_size)
-    
-    # --- Check 85% Accuracy Threshold ---
-    is_calibrated = bool(rolling_acc >= 0.85)
-    
-    # Perform inference on today's latest data (the final row)
-    today_vector = X_norm[-1]
-    today_z = np.dot(weights, today_vector) + bias
-    today_prob = sigmoid(today_z)
-    
-    # Scale probability into an intuitive acuteness score from 1.0 (calm) to 10.0 (critical emergency)
-    acuteness_score = round(1.0 + (today_prob * 9.0), 2)
-    binary_pred = 1 if today_prob >= 0.50 else 0
-    
-    # Save all learned parameters and calibration status back to state
+
+    # Up-weight the rare positive class so the model is not rewarded for ignoring flares
+    n_pos = int(y.sum())
+    pos_weight = (len(y) - n_pos) / max(n_pos, 1)
+
+    preds = np.zeros(len(y), dtype=int)
+    for i in range(len(y)):
+        prob = sigmoid(np.dot(weights, X_norm[i]) + bias)
+        preds[i] = int(prob >= ALERT_THRESHOLD)
+        # Standard SGD step on every sample (not just on errors), weighted by class
+        sample_weight = pos_weight if y[i] == 1 else 1.0
+        grad = sample_weight * (prob - y[i])
+        weights -= LEARNING_RATE * grad * X_norm[i]
+        bias -= LEARNING_RATE * grad
+
+    # Skip a short warm-up period when scoring, since the model starts untrained
+    warmup = min(14, len(y) // 4)
+    p, t = preds[warmup:], y[warmup:]
+    tp = int(((p == 1) & (t == 1)).sum())
+    tn = int(((p == 0) & (t == 0)).sum())
+    fp = int(((p == 1) & (t == 0)).sum())
+    fn = int(((p == 0) & (t == 1)).sum())
+    accuracy = (tp + tn) / max(len(t), 1)
+    recall = tp / max(tp + fn, 1)
+    specificity = tn / max(tn + fp, 1)
+    precision = tp / max(tp + fp, 1)
+    balanced_acc = (recall + specificity) / 2
+    baseline_acc = 1.0 - (t.mean() if len(t) else 0.0)
+
+    is_calibrated = bool(
+        (tp + fn) >= MIN_FLARE_EVENTS
+        and balanced_acc >= MIN_BALANCED_ACCURACY
+        and recall >= MIN_RECALL
+    )
+
+    # Forecast tomorrow from today's features
+    today_prob = sigmoid(np.dot(weights, today_norm) + bias)
+    acuteness_score = round(1.0 + today_prob * 9.0, 2)
+
     state["model_weights"] = weights.tolist()
     state["model_bias"] = bias
-    state["training_iteration_count"] = total_samples
-    state["rolling_accuracy_score"] = round(rolling_acc, 4)
+    state["training_iteration_count"] = len(y)
+    state["rolling_accuracy_score"] = round(accuracy, 4)
+    state["model_recall"] = round(recall, 4)
+    state["model_precision"] = round(precision, 4)
+    state["model_balanced_accuracy"] = round(balanced_acc, 4)
+    state["baseline_accuracy"] = round(float(baseline_acc), 4)
+    state["flare_events_observed"] = int(tp + fn)
     state["is_model_calibrated"] = is_calibrated
+    state["today_flare_probability"] = round(today_prob, 4)
     state["model_acuteness_score"] = acuteness_score
-    state["model_binary_prediction"] = binary_pred
-    
-    # Log results
-    calibration_status = "READY (>=85%)" if is_calibrated else "NOT CALIBRATED (<85%)"
+    state["model_binary_prediction"] = int(today_prob >= ALERT_THRESHOLD)
+
+    status = "VALIDATED" if is_calibrated else "NOT VALIDATED (rule-based fallback will be used)"
     state["execution_logs"].append(
-        f"Adaptive Learner: Training completed. Accuracy: {rolling_acc*100:.1f}%. Status: {calibration_status}."
+        f"Adaptive Learner: Out-of-sample accuracy {accuracy*100:.1f}% (always-'no flare' baseline "
+        f"{baseline_acc*100:.1f}%), flare recall {recall*100:.0f}% ({tp}/{tp+fn}), precision "
+        f"{precision*100:.0f}%, balanced accuracy {balanced_acc*100:.1f}%. Status: {status}."
     )
     return state

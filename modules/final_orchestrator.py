@@ -1,42 +1,73 @@
 # Import shared state
 from core.state import PediatricHealthState
 
+STATUS_LINE = {
+    "low": "✅ Status Today: Things look stable",
+    "elevated": "⚠️ Status Today: Somewhat higher risk of a flare-up",
+    "high": "🔶 Status Today: Higher risk of a flare-up",
+}
+
+EMERGENCY_NOTE = (
+    "🚨 Get emergency care now (call your local emergency number) if your child is struggling to breathe, "
+    "can't speak in full sentences, has blue or grey lips, or the rescue inhaler isn't helping.\n"
+    "This update is an early-warning aid, not medical advice. Always follow the asthma action plan "
+    "your child's doctor gave you."
+)
+
+
+def _reasons(state: PediatricHealthState) -> list:
+    reasons = []
+    if state["outdoor_pm25"] > state.get("vital_thresholds", {}).get("extreme_pm25_exposure", 45.0):
+        reasons.append("Outdoor air pollution is high today.")
+    if state["outdoor_pollen_index"] >= 6:
+        reasons.append("Pollen levels are high.")
+    if state["parent_reported_night_waking"]:
+        reasons.append("You reported night-time coughing, which can mean the airways are irritated.")
+    if state["parent_reported_cough_frequency"] >= 4:
+        reasons.append("Coughing has been frequent today.")
+    if state["medication_adherence_percent"] < 1.0:
+        reasons.append("Some controller doses were missed recently.")
+    if state["home_pet_dander_present"]:
+        reasons.append("Pet allergens at home may add to symptoms.")
+    return reasons
+
+
 def synthesize_and_translate_for_parents(state: PediatricHealthState) -> PediatricHealthState:
-    """Reconciles clinical critique and translates medical analysis into clear parent guidance."""
-    # Log reconciliation step
+    """Reconciles the critique and writes guidance whose content depends on the risk tier.
+
+    Guidance deliberately does not tell parents to change medication doses: that is the
+    job of the child's written asthma action plan and their clinician.
+    """
     state["execution_logs"].append("Final Orchestrator: Reconciling critique and drafting parent action plan.")
-    
-    # 1. Synthesize Technical Clinical Observation
-    technical_summary = (
-        f"FINAL CLINICAL CONSENSUS:\n"
-        f"Child is entering a PRE-ACUTE FLARE STAGE.\n"
-        f"Initial assessment risk confirmed, elevated further by nocturnal cough and 50% controller missed dose.\n"
-        f"Recommended Action: Step-up inhaled corticosteroid (ICS) protocol per Asthma Action Plan, "
-        f"isolate child from pet dander, and initiate air filtration."
+    tier = state.get("risk_tier", "low")
+    reasons = _reasons(state)
+
+    state["final_clinical_observation"] = (
+        f"FINAL CONSENSUS: risk tier {tier.upper()}.\n"
+        f"Basis: {'validated model' if state['is_model_calibrated'] else 'rule-based fallback'}; "
+        f"model P(flare tomorrow) = {state['today_flare_probability']*100:.0f}%.\n"
+        f"Critique:\n{state['critique_pushback_notes']}\n"
+        f"Suggested clinician review: {'yes' if tier == 'high' else 'routine'}."
     )
-    state["final_clinical_observation"] = technical_summary
-    
-    # 2. Distill into Empathetic, Non-Jargon Parent Language
-    parent_guide = (
-        f"💙 DAILY HEALTH UPDATE FOR PARENTS\n"
-        f"--------------------------------------------------\n"
-        f"Hello! Here is how your child is doing today and what to keep an eye on:\n\n"
-        f"⚠️ Status Today: Elevated Risk of an Asthma Flare-Up\n\n"
-        f"Why we are flagging this:\n"
-        f"• Outdoor air quality is poor today (dust and pollution are elevated).\n"
-        f"• The night-time coughing reported during check-in means their lungs are feeling extra sensitive.\n"
-        f"• We noticed the morning controller inhaler was missed.\n\n"
-        f"📋 Action Steps for Today:\n"
-        f"1. Make sure your child takes their prescribed controller inhaler right away.\n"
-        f"2. Keep windows closed and run the indoor air purifier if available.\n"
-        f"3. Keep rescue inhaler (Albuterol) accessible in their backpack or room.\n"
-        f"4. Limit heavy outdoor running until the air clears up.\n\n"
-        f"📞 When to Call the Clinic:\n"
-        f"If coughing continues despite using the rescue inhaler, or if you notice their chest pulling in when breathing, "
-        f"call your pediatrician or visit urgent care immediately."
-    )
-    
-    # Save parent translation to state
-    state["parent_distilled_action_plan"] = parent_guide
-    state["execution_logs"].append("Final Orchestrator: Parent guidance generated.")
+
+    steps = []
+    if tier in ("elevated", "high"):
+        steps.append("Follow the 'yellow zone' steps on your child's asthma action plan if they have symptoms.")
+        if state["medication_adherence_percent"] < 1.0:
+            steps.append("Give the next controller dose on schedule as prescribed. Don't double up unless your doctor told you to.")
+        steps.append("Keep the rescue inhaler with your child today.")
+        if state["outdoor_pm25"] > 35:
+            steps.append("Keep windows closed and limit hard outdoor exercise while air quality is poor.")
+    if tier == "high":
+        steps.append("Consider calling your child's doctor or nurse line today to talk about these warning signs.")
+    if tier == "low":
+        steps.append("Keep up the usual routine and controller medicine as prescribed.")
+
+    lines = ["💙 DAILY HEALTH UPDATE", "-" * 50, STATUS_LINE[tier], ""]
+    if reasons:
+        lines += ["Why:"] + [f"• {r}" for r in reasons] + [""]
+    lines += ["📋 Suggested steps:"] + [f"{i}. {s}" for i, s in enumerate(steps, 1)] + ["", EMERGENCY_NOTE]
+
+    state["parent_distilled_action_plan"] = "\n".join(lines)
+    state["execution_logs"].append(f"Final Orchestrator: Parent guidance generated for tier {tier.upper()}.")
     return state

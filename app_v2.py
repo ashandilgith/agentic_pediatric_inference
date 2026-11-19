@@ -542,14 +542,16 @@ if run_pipeline:
     calibrated = final_state["is_model_calibrated"]
 
     col1.metric(
-        "Rolling Accuracy",
-        f"{acc:.1f}%"
+        "Flare Recall",
+        f"{final_state['model_recall']*100:.0f}%",
+        delta=f"precision {final_state['model_precision']*100:.0f}%",
+        delta_color="off"
     )
 
     col2.metric(
-        "Calibration",
-        "READY" if calibrated else "LEARNING",
-        delta="≥ 85%" if calibrated else "< 85%",
+        "Model Status",
+        "VALIDATED" if calibrated else "RULE FALLBACK",
+        delta=f"bal. acc {final_state['model_balanced_accuracy']*100:.0f}%",
         delta_color="normal" if calibrated else "inverse"
     )
 

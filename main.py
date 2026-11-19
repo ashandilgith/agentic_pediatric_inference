@@ -1,3 +1,4 @@
+import numpy as np
 # Import synthetic generator to create local training CSV
 from modules.synthetic_data import generate_synthetic_patient_records
 # Import graph compiler
@@ -70,8 +71,10 @@ if __name__ == "__main__":
     # Step 5: Display Adaptive Learner Metrics
     print("--- ⚙️ ADAPTIVE LEARNER METRICS ---")
     acc = final_output_state["rolling_accuracy_score"] * 100
-    status = "READY (>=85%)" if final_output_state["is_model_calibrated"] else "CALIBRATING (<85%)"
-    print(f"Rolling Accuracy: {acc:.2f}% | Status: {status}")
+    status = "VALIDATED" if final_output_state["is_model_calibrated"] else "NOT VALIDATED (rule-based fallback)"
+    print(f"Accuracy: {acc:.2f}% (always-'no flare' baseline: {final_output_state['baseline_accuracy']*100:.2f}%)")
+    print(f"Flare recall: {final_output_state['model_recall']*100:.1f}% | Precision: {final_output_state['model_precision']*100:.1f}% | Status: {status}")
+    print(f"Tomorrow's flare probability: {final_output_state['today_flare_probability']*100:.1f}% | Risk tier: {final_output_state['risk_tier']}")
     print(f"Learned Parameters: Weights={np.round(final_output_state['model_weights'], 3)}, Bias={final_output_state['model_bias']:.3f}")
     print(f"Calculated Acuteness Index: {final_output_state['model_acuteness_score']}/10.0\n")
     
